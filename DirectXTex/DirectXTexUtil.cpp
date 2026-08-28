@@ -953,6 +953,51 @@ size_t DirectX::BytesPerBlock(DXGI_FORMAT fmt) noexcept
 }
 
 
+namespace
+{
+    // Multiplies two 64-bit values, setting 'overflow' if the mathematical result is
+    // not representable. Returns 0 in that case; callers test the flag once after all
+    // computations rather than at every individual site.
+    inline uint64_t MulOverflow(uint64_t a, uint64_t b, bool& overflow) noexcept
+    {
+    #if defined(__GNUC__) || defined(__clang__)
+        uint64_t result = 0;
+        if (__builtin_mul_overflow(a, b, &result))
+        {
+            overflow = true;
+            return 0;
+        }
+        return result;
+    #elif defined(_MSC_VER) && (defined(_M_ARM64) || defined(_M_ARM64EC))
+        const uint64_t high = __umulh(a, b);
+        const uint64_t result = a * b;
+        if (high != 0)
+        {
+            overflow = true;
+            return 0;
+        }
+        return result;
+    #elif defined(_MSC_VER) && defined(_M_X64)
+        uint64_t high = 0;
+        const uint64_t result = _umul128(a, b, &high);
+        if (high != 0)
+        {
+            overflow = true;
+            return 0;
+        }
+        return result;
+    #else
+        const uint64_t result = a * b;
+        if ((a != 0) && ((result / a) != b))
+        {
+            overflow = true;
+            return 0;
+        }
+        return result;
+    #endif
+    }
+}
+
 //-------------------------------------------------------------------------------------
 // Computes the image row pitch in bytes, and the slice ptich (size in bytes of the image)
 // based on DXGI format, width, and height
@@ -963,6 +1008,7 @@ HRESULT DirectX::ComputePitch(DXGI_FORMAT fmt, size_t width, size_t height,
 {
     uint64_t pitch = 0;
     uint64_t slice = 0;
+    bool overflow = false;
 
     switch (static_cast<int>(fmt))
     {
@@ -981,15 +1027,15 @@ HRESULT DirectX::ComputePitch(DXGI_FORMAT fmt, size_t width, size_t height,
             {
                 const size_t nbw = width >> 2;
                 const size_t nbh = height >> 2;
-                pitch = std::max<uint64_t>(1u, uint64_t(nbw) * 8u);
-                slice = std::max<uint64_t>(1u, pitch * uint64_t(nbh));
+                pitch = std::max<uint64_t>(1u, MulOverflow(nbw, 8u, overflow));
+                slice = std::max<uint64_t>(1u, MulOverflow(pitch, nbh, overflow));
             }
             else
             {
-                const uint64_t nbw = std::max<uint64_t>(1u, (uint64_t(width) + 3u) / 4u);
-                const uint64_t nbh = std::max<uint64_t>(1u, (uint64_t(height) + 3u) / 4u);
-                pitch = nbw * 8u;
-                slice = pitch * nbh;
+                const uint64_t nbw = std::max<uint64_t>(1u, (uint64_t(width) >> 2) + ((width & 3u) ? 1u : 0u));
+                const uint64_t nbh = std::max<uint64_t>(1u, (uint64_t(height) >> 2) + ((height & 3u) ? 1u : 0u));
+                pitch = MulOverflow(nbw, 8u, overflow);
+                slice = MulOverflow(pitch, nbh, overflow);
             }
         }
         break;
@@ -1015,15 +1061,15 @@ HRESULT DirectX::ComputePitch(DXGI_FORMAT fmt, size_t width, size_t height,
             {
                 const size_t nbw = width >> 2;
                 const size_t nbh = height >> 2;
-                pitch = std::max<uint64_t>(1u, uint64_t(nbw) * 16u);
-                slice = std::max<uint64_t>(1u, pitch * uint64_t(nbh));
+                pitch = std::max<uint64_t>(1u, MulOverflow(nbw, 16u, overflow));
+                slice = std::max<uint64_t>(1u, MulOverflow(pitch, nbh, overflow));
             }
             else
             {
-                const uint64_t nbw = std::max<uint64_t>(1u, (uint64_t(width) + 3u) / 4u);
-                const uint64_t nbh = std::max<uint64_t>(1u, (uint64_t(height) + 3u) / 4u);
-                pitch = nbw * 16u;
-                slice = pitch * nbh;
+                const uint64_t nbw = std::max<uint64_t>(1u, (uint64_t(width) >> 2) + ((width & 3u) ? 1u : 0u));
+                const uint64_t nbh = std::max<uint64_t>(1u, (uint64_t(height) >> 2) + ((height & 3u) ? 1u : 0u));
+                pitch = MulOverflow(nbw, 16u, overflow);
+                slice = MulOverflow(pitch, nbh, overflow);
             }
         }
         break;
@@ -1032,15 +1078,15 @@ HRESULT DirectX::ComputePitch(DXGI_FORMAT fmt, size_t width, size_t height,
     case DXGI_FORMAT_G8R8_G8B8_UNORM:
     case DXGI_FORMAT_YUY2:
         assert(IsPacked(fmt));
-        pitch = ((uint64_t(width) + 1u) >> 1) * 4u;
-        slice = pitch * uint64_t(height);
+        pitch = MulOverflow((uint64_t(width) >> 1) + (width & 1u), 4u, overflow);
+        slice = MulOverflow(pitch, height, overflow);
         break;
 
     case DXGI_FORMAT_Y210:
     case DXGI_FORMAT_Y216:
         assert(IsPacked(fmt));
-        pitch = ((uint64_t(width) + 1u) >> 1) * 8u;
-        slice = pitch * uint64_t(height);
+        pitch = MulOverflow((uint64_t(width) >> 1) + (width & 1u), 8u, overflow);
+        slice = MulOverflow(pitch, height, overflow);
         break;
 
     case DXGI_FORMAT_NV12:
@@ -1051,8 +1097,8 @@ HRESULT DirectX::ComputePitch(DXGI_FORMAT fmt, size_t width, size_t height,
             return E_INVALIDARG;
         }
         assert(IsPlanar(fmt));
-        pitch = ((uint64_t(width) + 1u) >> 1) * 2u;
-        slice = pitch * (uint64_t(height) + ((uint64_t(height) + 1u) >> 1));
+        pitch = MulOverflow((uint64_t(width) >> 1) + (width & 1u), 2u, overflow);
+        slice = MulOverflow(pitch, uint64_t(height) + ((uint64_t(height) >> 1) + (height & 1u)), overflow);
         break;
 
     case DXGI_FORMAT_P010:
@@ -1075,20 +1121,20 @@ HRESULT DirectX::ComputePitch(DXGI_FORMAT fmt, size_t width, size_t height,
     case XBOX_DXGI_FORMAT_R16_UNORM_X8_TYPELESS:
     case XBOX_DXGI_FORMAT_X16_TYPELESS_G8_UINT:
         assert(IsPlanar(fmt));
-        pitch = ((uint64_t(width) + 1u) >> 1) * 4u;
-        slice = pitch * (uint64_t(height) + ((uint64_t(height) + 1u) >> 1));
+        pitch = MulOverflow((uint64_t(width) >> 1) + (width & 1u), 4u, overflow);
+        slice = MulOverflow(pitch, uint64_t(height) + ((uint64_t(height) >> 1) + (height & 1u)), overflow);
         break;
 
     case DXGI_FORMAT_NV11:
         assert(IsPlanar(fmt));
-        pitch = ((uint64_t(width) + 3u) >> 2) * 4u;
-        slice = pitch * uint64_t(height) * 2u;
+        pitch = MulOverflow((uint64_t(width) >> 2) + ((width & 3u) ? 1u : 0u), 4u, overflow);
+        slice = MulOverflow(MulOverflow(pitch, height, overflow), 2u, overflow);
         break;
 
     case WIN10_DXGI_FORMAT_P208:
         assert(IsPlanar(fmt));
-        pitch = ((uint64_t(width) + 1u) >> 1) * 2u;
-        slice = pitch * uint64_t(height) * 2u;
+        pitch = MulOverflow((uint64_t(width) >> 1) + (width & 1u), 2u, overflow);
+        slice = MulOverflow(MulOverflow(pitch, height, overflow), 2u, overflow);
         break;
 
     case WIN10_DXGI_FORMAT_V208:
@@ -1099,13 +1145,13 @@ HRESULT DirectX::ComputePitch(DXGI_FORMAT fmt, size_t width, size_t height,
         }
         assert(IsPlanar(fmt));
         pitch = uint64_t(width);
-        slice = pitch * (uint64_t(height) + (((uint64_t(height) + 1u) >> 1) * 2u));
+        slice = MulOverflow(pitch, uint64_t(height) + (((uint64_t(height) >> 1) + (height & 1u)) * 2u), overflow);
         break;
 
     case WIN10_DXGI_FORMAT_V408:
         assert(IsPlanar(fmt));
         pitch = uint64_t(width);
-        slice = pitch * (uint64_t(height) + (uint64_t(height >> 1) * 4u));
+        slice = MulOverflow(pitch, uint64_t(height) + (uint64_t(height >> 1) * 4u), overflow);
         break;
 
     default:
@@ -1129,40 +1175,49 @@ HRESULT DirectX::ComputePitch(DXGI_FORMAT fmt, size_t width, size_t height,
             {
                 if (flags & CP_FLAGS_PAGE4K)
                 {
-                    pitch = ((uint64_t(width) * bpp + 32767u) / 32768u) * 4096u;
-                    slice = pitch * uint64_t(height);
+                    pitch = MulOverflow((MulOverflow(width, bpp, overflow) + 32767u) / 32768u, 4096u, overflow);
+                    slice = MulOverflow(pitch, height, overflow);
                 }
                 else if (flags & CP_FLAGS_ZMM)
                 {
-                    pitch = ((uint64_t(width) * bpp + 511u) / 512u) * 64u;
-                    slice = pitch * uint64_t(height);
+                    pitch = MulOverflow((MulOverflow(width, bpp, overflow) + 511u) / 512u, 64u, overflow);
+                    slice = MulOverflow(pitch, height, overflow);
                 }
                 else if (flags & CP_FLAGS_YMM)
                 {
-                    pitch = ((uint64_t(width) * bpp + 255u) / 256u) * 32u;
-                    slice = pitch * uint64_t(height);
+                    pitch = MulOverflow((MulOverflow(width, bpp, overflow) + 255u) / 256u, 32u, overflow);
+                    slice = MulOverflow(pitch, height, overflow);
                 }
                 else if (flags & CP_FLAGS_PARAGRAPH)
                 {
-                    pitch = ((uint64_t(width) * bpp + 127u) / 128u) * 16u;
-                    slice = pitch * uint64_t(height);
+                    pitch = MulOverflow((MulOverflow(width, bpp, overflow) + 127u) / 128u, 16u, overflow);
+                    slice = MulOverflow(pitch, height, overflow);
                 }
                 else // DWORD alignment
                 {
                     // Special computation for some incorrectly created DDS files based on
                     // legacy DirectDraw assumptions about pitch alignment
-                    pitch = ((uint64_t(width) * bpp + 31u) / 32u) * sizeof(uint32_t);
-                    slice = pitch * uint64_t(height);
+                    pitch = MulOverflow((MulOverflow(width, bpp, overflow) + 31u) / 32u, sizeof(uint32_t), overflow);
+                    slice = MulOverflow(pitch, height, overflow);
                 }
             }
             else
             {
                 // Default byte alignment
-                pitch = (uint64_t(width) * bpp + 7u) / 8u;
-                slice = pitch * uint64_t(height);
+                pitch = (MulOverflow(width, bpp, overflow) + 7u) / 8u;
+                slice = MulOverflow(pitch, height, overflow);
             }
         }
         break;
+    }
+
+    // A 64-bit overflow in the computations above would silently produce a slice pitch
+    // inconsistent with the row pitch and scanline count, which callers rely on to size
+    // allocations. Reject rather than truncate.
+    if (overflow)
+    {
+        rowPitch = slicePitch = 0;
+        return HRESULT_E_ARITHMETIC_OVERFLOW;
     }
 
 #if defined(_M_IX86) || defined(_M_ARM) || defined(_M_HYBRID_X86_ARM64)

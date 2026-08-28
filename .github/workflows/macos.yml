@@ -3,7 +3,7 @@
 #
 # https://go.microsoft.com/fwlink/?LinkId=248926
 
-name: 'BVTs (x64)'
+name: 'CMake (MacOS)'
 
 on:
   push:
@@ -41,61 +41,18 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-2022
-    timeout-minutes: 60
+    runs-on: macos-latest
 
     strategy:
       fail-fast: false
 
       matrix:
-        toolver: ['14.29', '14']
-        build_type: [x64-Release]
-        arch: [amd64]
+        build_type: [arm64-Debug-Linux, arm64-Release-Linux]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Clone test repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: walbourn/directxtextest
-          path: Tests
-          ref: main
-
-      - name: 'Install Ninja'
-        run: choco install ninja
-
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-        with:
-          arch: ${{ matrix.arch }}
-          toolset: ${{ matrix.toolver }}
-
-      - name: 'Set triplet'
-        shell: pwsh
-        run: |
-          if ("${{ matrix.arch }}" -eq "amd64")
-          {
-              echo "VCPKG_DEFAULT_TRIPLET=x64-windows" >> $env:GITHUB_ENV
-          }
-          elseif ("${{ matrix.arch }}" -eq "amd64_x86")
-          {
-              echo "VCPKG_DEFAULT_TRIPLET=x86-windows" >> $env:GITHUB_ENV
-          }
-          elseif ("${{ matrix.arch }}" -eq "amd64_arm64")
-          {
-              if ("${{ matrix.build_type }}" -match "^arm64ec")
-              {
-                  echo "VCPKG_DEFAULT_TRIPLET=arm64ec-windows" >> $env:GITHUB_ENV
-              }
-              else
-              {
-                  echo "VCPKG_DEFAULT_TRIPLET=arm64-windows" >> $env:GITHUB_ENV
-              }
-          }
-          else
-          {
-              echo "::error Unknown architecture/build-type triplet mapping"
-          }
+      - uses: seanmiddleditch/gha-setup-ninja@3b1f8f94a2f8254bd26914c4ab9474d4f0015f67 # v6
 
       - name: Get vcpkg commit hash
         shell: pwsh
@@ -119,18 +76,32 @@ jobs:
           runVcpkgInstall: true
           vcpkgJsonGlob: '**/build/vcpkg.json'
           vcpkgGitCommitId: '${{ env.VCPKG_COMMIT_ID }}'
+          runVcpkgFormatString: >
+            [`install`, `--allow-unsupported`, `--recurse`, `--clean-after-build`, `--x-install-root`,
+            `$[env.VCPKG_INSTALLED_DIR]`, `--triplet`, `arm64-osx`]
 
       - name: 'Configure CMake'
         working-directory: ${{ github.workspace }}
         run: >
-          cmake --preset=${{ matrix.build_type }} -DBUILD_TESTING=ON -DBUILD_TOOLS=OFF -DBUILD_SAMPLE=OFF -DBUILD_BVT=ON
+          cmake --preset=${{ matrix.build_type }} -DENABLE_LIBJPEG_SUPPORT=ON -DENABLE_LIBPNG_SUPPORT=ON
           -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_DIR="${{ github.workspace }}/build"
-          -DVCPKG_TARGET_TRIPLET="${env:VCPKG_DEFAULT_TRIPLET}"
+          -DVCPKG_TARGET_TRIPLET="arm64-osx" -DVCPKG_INSTALL_OPTIONS=--allow-unsupported
 
       - name: 'Build'
         working-directory: ${{ github.workspace }}
-        run: cmake --build out\build\${{ matrix.build_type }}
+        run: cmake --build out/build/${{ matrix.build_type }}
 
-      - name: 'Run BVTs'
+      - name: 'Clean up'
         working-directory: ${{ github.workspace }}
-        run: ctest --preset=${{ matrix.build_type }} --output-on-failure
+        run: rm -rf out
+
+      - name: 'Configure CMake (-shared)'
+        working-directory: ${{ github.workspace }}
+        run: >
+          cmake --preset=${{ matrix.build_type }} -DENABLE_LIBJPEG_SUPPORT=ON -DENABLE_LIBPNG_SUPPORT=ON
+          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_DIR="${{ github.workspace }}/build"
+          -DVCPKG_TARGET_TRIPLET="arm64-osx" -DVCPKG_INSTALL_OPTIONS=--allow-unsupported -DBUILD_SHARED_LIBS=ON
+
+      - name: 'Build (-shared)'
+        working-directory: ${{ github.workspace }}
+        run: cmake --build out/build/${{ matrix.build_type }}
